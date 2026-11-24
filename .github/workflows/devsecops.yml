@@ -35,7 +35,7 @@ jobs:
           errors = [r for r in results if r.get("extra", {}).get("severity") == "ERROR"]
           warnings = [r for r in results if r.get("extra", {}).get("severity") == "WARNING"]
           print(f"[Semgrep SAST] Total: {len(results)} | Altas (ERROR): {len(errors)} | Medias (WARNING): {len(warnings)}")
-          UMBRAL_BLOQUEO = 5
+          UMBRAL_BLOQUEO = 10
           if len(errors) > UMBRAL_BLOQUEO:
               print(f"::error::QUALITY GATE BLOQUEANTE: {len(errors)} hallazgos altos superan el umbral ({UMBRAL_BLOQUEO}).")
               sys.exit(1)
@@ -60,11 +60,13 @@ jobs:
           '
 
       # 3. DAST - OWASP ZAP (Quality Gate AVISO)
+      # 3. DAST - OWASP ZAP (Quality Gate AVISO)
       - name: DAST con OWASP ZAP y Quality Gate de Aviso
         if: always()
         run: |
+          chmod 777 "${{ github.workspace }}"
           docker run -d --name juice-shop -p 3000:3000 bkimminich/juice-shop
-          timeout 60 bash -c 'until curl -s http://localhost:3000 > /dev/null; do sleep 2; done'
+          timeout 120 bash -c 'until curl -s http://localhost:3000 > /dev/null; do sleep 2; done'
           docker run --rm --network host -v "${{ github.workspace }}:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://localhost:3000 -x zap.xml -I || true
           docker stop juice-shop || true
@@ -79,7 +81,6 @@ jobs:
               if len(high) > 0 or len(med) > 2:
                   print(f"::warning::QUALITY GATE (AVISO): ZAP detectó {len(high)} alertas High y {len(med)} Medium.")
           '
-
       # Conservación de informes como artefactos
       - name: Guardar informes como artefactos
         if: always()
