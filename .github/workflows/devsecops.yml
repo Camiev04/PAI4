@@ -1,0 +1,135 @@
+name: DevSecOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  security-scans:
+    name: Análisis de Seguridad y Quality Gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 1. SAST - Semgrep (Quality Gate BLOQUEANTE)
+      - name: SAST con Semgrep y Quality Gate Bloqueante
+        run: |
+          pip install --quiet semgrep
+          semgrep --config p/javascript --config p/nodejs \
+            --exclude='node_modules' --exclude='frontend' --exclude='defectdojo' --exclude='test' \
+            --json -o semgrep.json . || true
+          python3 -c '
+          import json, sys
+          data = json.load(open("semgrep.json"))
+          results = data.get("results", [])
+          errors = [r for r in results if r.get("extra", {}).get("severity") == "ERROR"]
+          warnings = [r for r in results if r.get("extra", {}).get("severity") == "WARNING"]
+          print(f"[Semgrep SAST] Total: {len(results)} | Altas (ERROR): {len(errors)} | Medias (WARNING): {len(warnings)}")
+          UMBRAL_BLOQUEO = 5
+          if len(errors) > UMBRAL_BLOQUEO:
+              print(f"::error::QUALITY GATE BLOQUEANTE: {len(errors)} hallazgos altos superan el umbral ({UMBRAL_BLOQUEO}).")
+              sys.exit(1)
+          print("Quality Gate Bloqueante superado.")
+          '
+
+      # 2. IaC / Contenedores - Checkov (Quality Gate AVISO)
+      - name: IaC con Checkov y Quality Gate de Aviso
+        if: always()
+        run: |
+          pip install --quiet checkov
+          checkov -d . --framework dockerfile --skip-path defectdojo --output json > checkov.json || true
+          python3 -c '
+          import json
+          raw = json.load(open("checkov.json"))
+          report = raw[0] if isinstance(raw, list) else raw
+          failed = report.get("results", {}).get("failed_checks", [])
+          print(f"[Checkov IaC] Controles fallidos en Dockerfile: {len(failed)}")
+          UMBRAL_AVISO = 2
+          if len(failed) > UMBRAL_AVISO:
+              print(f"::warning::QUALITY GATE (AVISO): Checkov detectó {len(failed)} problemas en Dockerfile (umbral: {UMBRAL_AVISO}).")
+          '
+
+      # 3. DAST - OWASP ZAP (Quality Gate AVISO)
+      - name: DAST con OWASP ZAP y Quality Gate de Aviso
+        if: always()
+        run: |
+          docker run -d --name juice-shop -p 3000:3000 bkimminich/juice-shop
+          timeout 60 bash -c 'until curl -s http://localhost:3000 > /dev/null; do sleep 2; done'
+          docker run --rm --network host -v "${{ github.workspace }}:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://localhost:3000 -x zap.xml -I || true
+          docker stop juice-shop || true
+          python3 -c '
+          import xml.etree.ElementTree as ET, os
+          if os.path.exists("zap.xml"):
+              tree = ET.parse("zap.xml")
+              alerts = tree.findall(".//alertitem")
+              high = [a for a in alerts if a.findtext("riskcode") == "3"]
+              med = [a for a in alerts if a.findtext("riskcode") == "2"]
+              print(f"[OWASP ZAP DAST] Alertas totales: {len(alerts)} | High: {len(high)} | Medium: {len(med)}")
+              if len(high) > 0 or len(med) > 2:
+                  print(f"::warning::QUALITY GATE (AVISO): ZAP detectó {len(high)} alertas High y {len(med)} Medium.")
+          '
+
+      # Conservación de informes como artefactos
+      - name: Guardar informes como artefactos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            semgrep.json
+            checkov.json
+            zap.xml
+          if-no-files-found: warn
+
+  import-to-defectdojo:
+    name: Importar Informes a DefectDojo
+    needs: security-scans
+    if: always()
+    runs-on: self-hosted
+
+    steps:
+      - name: Descargar artefactos de seguridad
+        uses: actions/download-artifact@v4
+        with:
+          name: security-reports
+
+      - name: Enviar resultados a DefectDojo API v2
+        shell: powershell
+        env:
+          DOJO_URL: ${{ secrets.DOJO_URL }}
+          DOJO_TOKEN: ${{ secrets.DOJO_TOKEN }}
+        run: |
+          $scans = @(
+            @{ file = "semgrep.json"; type = "Semgrep JSON Report" },
+            @{ file = "checkov.json"; type = "Checkov Scan" },
+            @{ file = "zap.xml";      type = "ZAP Scan" }
+          )
+          foreach ($s in $scans) {
+            if (Test-Path $s.file) {
+              Write-Host "Subiendo $($s.file) ($($s.type)) a DefectDojo..."
+              $code = curl.exe -s -o response.txt -w "%{http_code}" -X POST "$env:DOJO_URL/api/v2/import-scan/" `
+                -H "Authorization: Token $env:DOJO_TOKEN" `
+                -F "scan_type=$($s.type)" `
+                -F "file=@$($s.file)" `
+                -F "product_name=Juice Shop" `
+                -F "engagement_name=CI/CD Pipeline" `
+                -F "auto_create_context=true" `
+                -F "minimum_severity=Info"
+              Write-Host "HTTP Status: $code"
+              if ($code -ne "201") {
+                Get-Content response.txt
+                exit 1
+              }
+            }
+          }
