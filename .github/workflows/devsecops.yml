@@ -60,7 +60,6 @@ jobs:
           '
 
       # 3. DAST - OWASP ZAP (Quality Gate AVISO)
-      # 3. DAST - OWASP ZAP (Quality Gate AVISO)
       - name: DAST con OWASP ZAP y Quality Gate de Aviso
         if: always()
         run: |

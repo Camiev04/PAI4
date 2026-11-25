@@ -71,3 +71,16 @@ config/*.yml
 # Misc
 .playwright-mcp/
 cypress/screenshots/
+
+# PAI 4 - DevSecOps (secretos, informes locales, runner y notas personales)
+.env
+.env.*
+semgrep.json
+checkov.json
+zap.xml
+response.txt
+actions-runner/
+seguimiento/
+Thumbs.db
+desktop.ini
+
